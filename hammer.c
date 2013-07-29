@@ -30,8 +30,6 @@ struct connection {
     struct proc_dir_entry *procfs_entry;
     char   *output;
     ssize_t output_len;
-    ssize_t output_pos;
-    struct task_struct *task;
 };
 
 LIST_HEAD(connections);
