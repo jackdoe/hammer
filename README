@@ -1,7 +1,7 @@
 small linux kernel module that creates interface in /proc
 for connecting, sending and receiving tcp socket data.
 
-* WARNING: might panic :) *
+* WARNING: might panic, use in control enviroinment*
 
 * build
     $ git clone https://github.com/jackdoe/hammer
@@ -9,14 +9,32 @@ for connecting, sending and receiving tcp socket data.
     $ sudo insmod hammer
 
 * connecting to something
-    $ echo "bzbzb" nc -l 12345 # start netcat listener on port 12345
+    $ echo "bzbzb" | nc -l 12345 # start netcat listener on port 12345
     $ sudo echo "127.0.0.1:12345" > /proc/hammer/__control
     $ sudo cat /proc/hammer/c_127.0.0.1:12345* 
     # you will see 'bzbzb'
     $ sudo echo "42" > /proc/hammer/c_127.0.0.1:12345*
     # you will see 42 on your netcat console
 
+* /proc/hammer/c_* format:
+  c_ip:port_{address of the pointer that is representing the current connection}
+    so it looks like: /proc/hammer/c_127.0.0.1:12345_ffff880003d2a700
+
 * aa... everything stays in memory. there is no mechanism for flushing anything,
   only unloading the module
 
+* concept
+  * there are no threads
+    we just get the sk_buffs from the tcp stack in interrupt context.
 
+  * no multiplexing
+    the kernel tcp stack mutiplexes for us, in the codepath driver->ip->tcp->sk_data_ready
+
+  * there is no sleeping, if memory allocation fails we just skip this frame.
+
+  * everything stays in kernel address space, only the last N bytes are coppied
+    on /proc/hammer/c_* read request
+
+
+* license
+   free for all
