@@ -66,6 +66,8 @@ int tail(char *buffer, char **buffer_location, off_t offset, int count, int *eof
     return count;
 }
 
+// uses the fact that *buffer is in the user address space, that is why 
+// copy_from_user and kernel_sendmsg are not used
 int hammer(struct file *file, const char *buffer, unsigned long count, void *data) {
     struct connection *c = (struct connection *) data;
     struct msghdr msg;
@@ -88,10 +90,10 @@ int hammer(struct file *file, const char *buffer, unsigned long count, void *dat
     return sock_sendmsg(c->socket, &msg, count);
 }
 
-
 int control_read(char *buffer, char **buffer_location, off_t offset, int count, int *eof, void *data) {
     return 0;
 }
+
 int control_write(struct file *file, const char *buffer, unsigned long count, void *data) {
     #define HAMMER__MAX_INPUT 512
     char parse_me[HAMMER__MAX_INPUT + 1];
@@ -145,7 +147,6 @@ void ___sk_data_ready (struct sock *sk, int bytes) {
 }
 
 static int hammer_tcp_data_recv(read_descriptor_t *desc, struct sk_buff *skb,unsigned int offset, size_t len) {
-
     struct connection *c = (struct connection *) desc->arg.data;
 
     c->output = krealloc(c->output,c->output_len + len,GFP_ATOMIC);
@@ -204,9 +205,11 @@ static struct connection * connect_to(char *host) {
         goto bad;
 
     spin_lock(&giant);
+
     list_add(&c->list,&connections);
     snprintf(c->procfs_name,128,"c_%s_%p",host,c);
     c->procfs_entry = procify(c->procfs_name,(void *) c, tail, hammer);
+
     spin_unlock(&giant);
 
     c->state = CONNECTED;
@@ -227,6 +230,7 @@ bad:
 static void disconnect(struct connection *c) {
     if (c->state & DISCONNECTED)
         return;
+
     c->state = DISCONNECTED;
     unregister_callbacks(c);
     kernel_sock_shutdown(c->socket,2);
@@ -236,6 +240,7 @@ struct proc_dir_entry *procify(char *name, void *data,
         int (*reader)(char *, char **, off_t, int, int *, void *),
         int (*writer)(struct file *, const char *, unsigned long, void *)) {
     struct proc_dir_entry *p = create_proc_entry(name,0644,root);
+
     if (p != NULL) {
         p->read_proc = reader;
         p->write_proc = writer; 
@@ -250,6 +255,7 @@ struct proc_dir_entry *procify(char *name, void *data,
 
 int init_module() {
     spin_lock_init(&giant);
+
     root = proc_mkdir(MODULE_NAME, NULL);
     if (root == NULL) 
         return -ENOMEM;
@@ -261,8 +267,10 @@ int init_module() {
 void cleanup_module() {
     struct list_head *pos,*q;
     struct connection *c;
-    spin_lock(&giant);
     D("cleaning up connections");
+
+    spin_lock(&giant);
+
     list_for_each_safe(pos, q, &connections) {
         c = list_entry(pos, struct connection, list);
         list_del(&c->list);
@@ -273,6 +281,7 @@ void cleanup_module() {
             remove_proc_entry(c->procfs_name, root);
         kfree(c);
     }
+
     spin_unlock(&giant);
 
     if (control)
