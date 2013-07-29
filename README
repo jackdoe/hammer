@@ -1,0 +1,22 @@
+small linux kernel module that creates interface in /proc
+for connecting, sending and receiving tcp socket data.
+
+* WARNING: might panic :) *
+
+* build
+    $ git clone https://github.com/jackdoe/hammer
+    $ cd hammer && make clean all
+    $ sudo insmod hammer
+
+* connecting to something
+    $ echo "bzbzb" nc -l 12345 # start netcat listener on port 12345
+    $ sudo echo "127.0.0.1:12345" > /proc/hammer/__control
+    $ sudo cat /proc/hammer/c_127.0.0.1:12345* 
+    # you will see 'bzbzb'
+    $ sudo echo "42" > /proc/hammer/c_127.0.0.1:12345*
+    # you will see 42 on your netcat console
+
+* aa... everything stays in memory. there is no mechanism for flushing anything,
+  only unloading the module
+
+
