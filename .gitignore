@@ -1,0 +1,8 @@
+.hammer*
+*.o
+*.ko
+*.mod
+*.mod.c
+.tmp*
+modules.order
+Module.symvers
