@@ -200,8 +200,9 @@ static struct connection * connect_to(char *host) {
 
     if ((rc = sock_create(AF_INET,SOCK_STREAM,IPPROTO_TCP,&c->socket)) < 0)
         goto bad;
-
+#ifdef SK_CAN_REUSE
     c->socket->sk->sk_reuse = SK_CAN_REUSE;
+#endif
     memset(&si, 0, sizeof(si));
     si.sin_family = AF_INET;
 
@@ -241,7 +242,12 @@ static void disconnect(struct connection *c) {
 
     c->state = DISCONNECTED;
     unregister_callbacks(c);
+   
+#ifndef kernel_sock_shutdown
+    c->socket->ops->shutdown(c->socket, 2);
+#else
     kernel_sock_shutdown(c->socket,2);
+#endif
 }
 
 struct proc_dir_entry *procify(char *name, void *data,
