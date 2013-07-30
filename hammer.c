@@ -4,56 +4,82 @@
 #include <net/sock.h>
 #include <net/tcp.h>
 #include <linux/proc_fs.h>
+#include <asm/types.h>
+MODULE_LICENSE("free-for-all");
 #define MODULE_NAME  "hammer"
 #define CONTROL_NAME "__control"
 
 // #define DEBUG
 #ifdef DEBUG
-#define D(fmt,arg...) printk(fmt " [%s():%s:%d]\n",##arg,__func__,__FILE__,__LINE__)
+  #define D(fmt,arg...) printk(fmt " [%s():%s:%d]\n",##arg,__func__,__FILE__,__LINE__)
 #else
-#define D(fmt,arg...)
+  #define D(fmt,arg...)
 #endif
 #define CONNECTED               1
 #define DISCONNECTED            2
-
+#define PROC_DATA 0
+#define PROC_STAT 1
 static struct proc_dir_entry *root;
 static struct proc_dir_entry *control;
 static spinlock_t giant;
-
+LIST_HEAD(connections);
 struct connection {
     struct list_head list;
     struct socket *socket;
     void   *orig_sk_user_data;
     void   (*orig_sk_data_ready)(struct sock *sk, int bytes);
     int    state;
-    char   procfs_name[128];
-    struct proc_dir_entry *procfs_entry;
+    struct proc {
+        char   name[128];
+        struct proc_dir_entry *entry;
+    } proc[2];
     char   *output;
     ssize_t output_len;
+    struct stats {
+        unsigned long long http_code[65535 + 1];
+    } stats;
 };
 
-LIST_HEAD(connections);
+// Status-Line = HTTP-Version SP Status-Code SP Reason-Phrase CRLF
+// http://www.w3.org/Protocols/rfc2616/rfc2616-sec6.html#sec6
+union http_status_line {
+    struct u64_u32 {
+        u64 http_dash_one_dot_one;
+        union {
+            u32 space_digit_digit_digit;
+            struct structed {
+                u8 space;
+                u8 digit_0;
+                u8 digit_1;
+                u8 digit_2;
+            }  __attribute__((packed)) structed;
+        } u32;
+    } __attribute__((packed)) u64_u32;
+    u8 u8[12];
+};
 
+static union http_status_line HTTP;
 static int inet_addr(char* ip, unsigned int *dest, unsigned short *port);
 static struct connection *connect_to(char *host);
 static void disconnect(struct connection *c);
 static int hammer_tcp_data_recv(read_descriptor_t *desc, struct sk_buff *skb,unsigned int offset, size_t len);
+static void hammer_sk_data_ready (struct sock *sk, int bytes);
 
-struct proc_dir_entry *procify(char *name, void *data,
+static struct proc_dir_entry *procify(char *name, void *data,
         int (*reader)(char *, char **, off_t, int, int *, void *),
         int (*writer)(struct file *, const char *, unsigned long, void *));
 
-
-int control_read(char *buffer, char **buffer_location, off_t offset, int count, int *eof, void *data);
-int control_write(struct file *file, const char *buffer, unsigned long count, void *data);
-
-int tail(char *buffer, char **buffer_location, off_t offset, int count, int *eof, void *data);
-int hammer(struct file *file, const char *buffer, unsigned long count, void *data);
+static void cleanup_procfs_entries(struct connection *c);
+static int control_read(char *buffer, char **buffer_location, off_t offset, int count, int *eof, void *data);
+static int control_write(struct file *file, const char *buffer, unsigned long count, void *data);
+static int tail(char *buffer, char **buffer_location, off_t offset, int count, int *eof, void *data);
+static int stats(char *buffer, char **buffer_location, off_t offset, int count, int *eof, void *data);
+static int hammer(struct file *file, const char *buffer, unsigned long count, void *data);
 
 // POC: just show the last 'count' bytes from the buffer
-int tail(char *buffer, char **buffer_location, off_t offset, int count, int *eof, void *data) {
+static int tail(char *buffer, char **buffer_location, off_t offset, int count, int *eof, void *data) {
     struct connection *c = (struct connection *) data;
-    if (!c || !c->output || c->output_len == 0)
+    if (!c)
         return -ENOENT;
 
     if (count > c->output_len) {
@@ -66,9 +92,32 @@ int tail(char *buffer, char **buffer_location, off_t offset, int count, int *eof
     return count;
 }
 
+static int stats(char *buffer, char **buffer_location, off_t offset, int count, int *eof, void *data) {
+    #define HAMMER_MAX_OUTPUT_STAT_SIZE 512
+    struct connection *c = (struct connection *) data;
+    int i,len = 0;
+    char output[HAMMER_MAX_OUTPUT_STAT_SIZE];
+
+    if (!c)
+        return -ENOENT;
+    if (offset > 0)
+        return 0;
+
+    if (count > HAMMER_MAX_OUTPUT_STAT_SIZE)
+        count = HAMMER_MAX_OUTPUT_STAT_SIZE;
+
+    memset(output,0,sizeof(output));
+    for (i = 0; i < sizeof(c->stats.http_code)/sizeof(c->stats.http_code[0]); i++) {
+        if (c->stats.http_code[i] > 0)
+            len = snprintf(output,sizeof(output) - 1,"%s%d : %lld\n",output,i,c->stats.http_code[i]);
+    }
+    memcpy(buffer,output,len);
+    return len;
+    #undef HAMMER_MAX_OUTPUT_STAT_SIZE
+}
 // uses the fact that *buffer is in the user address space, that is why 
 // copy_from_user and kernel_sendmsg are not used
-int hammer(struct file *file, const char *buffer, unsigned long count, void *data) {
+static int hammer(struct file *file, const char *buffer, unsigned long count, void *data) {
     struct connection *c = (struct connection *) data;
     struct msghdr msg;
     struct iovec iov;
@@ -90,11 +139,11 @@ int hammer(struct file *file, const char *buffer, unsigned long count, void *dat
     return sock_sendmsg(c->socket, &msg, count);
 }
 
-int control_read(char *buffer, char **buffer_location, off_t offset, int count, int *eof, void *data) {
+static int control_read(char *buffer, char **buffer_location, off_t offset, int count, int *eof, void *data) {
     return 0;
 }
 
-int control_write(struct file *file, const char *buffer, unsigned long count, void *data) {
+static int control_write(struct file *file, const char *buffer, unsigned long count, void *data) {
     #define HAMMER__MAX_INPUT 512
     char parse_me[HAMMER__MAX_INPUT + 1];
     char *p;
@@ -128,7 +177,7 @@ static int inet_addr(char* ip_port, unsigned int *dest,unsigned short *port) {
     return -1;
 }
 
-void ___sk_data_ready (struct sock *sk, int bytes) {
+static void hammer_sk_data_ready (struct sock *sk, int bytes) {
     void (*ready)(struct sock *, int);
     struct connection *c = (struct connection *) sk->sk_user_data;
     read_descriptor_t desc;
@@ -146,14 +195,38 @@ void ___sk_data_ready (struct sock *sk, int bytes) {
     (*ready)(sk,bytes);
 }
 
+void collect_http_stats(struct connection *c, size_t len) {
+    union http_status_line *status = (union http_status_line *) (c->output + c->output_len - len);
+    char s_code[4];
+    unsigned short code = 0;
+    
+    if (len < sizeof(HTTP) ||
+        status->u64_u32.http_dash_one_dot_one != HTTP.u64_u32.http_dash_one_dot_one)
+            return;
+
+    // just look for HTTP/1.1[whatever_one_byte][byte][byte][byte]
+    s_code[0] = status->u64_u32.u32.structed.digit_0;
+    s_code[1] = status->u64_u32.u32.structed.digit_1;
+    s_code[2] = status->u64_u32.u32.structed.digit_2;
+    s_code[3] = '\0';
+    
+    kstrtou16(s_code,10,&code);
+    c->stats.http_code[code]++;
+    D("found http packet with code: %d",code);
+}
+
 static int hammer_tcp_data_recv(read_descriptor_t *desc, struct sk_buff *skb,unsigned int offset, size_t len) {
     struct connection *c = (struct connection *) desc->arg.data;
+
+    if (len == 0)
+        return 0;
 
     c->output = krealloc(c->output,c->output_len + len,GFP_ATOMIC);
     if (c->output) {
         skb_copy_bits(skb, offset,(c->output + c->output_len),len);
         c->output_len += len;
-        c->procfs_entry->size = c->output_len;
+        c->proc[PROC_DATA].entry->size = c->output_len;
+        collect_http_stats(c,len);
     }
     return len;
 }
@@ -166,11 +239,11 @@ void register_callbacks(struct connection *c) {
 
     c->orig_sk_data_ready = sk->sk_data_ready;
     c->orig_sk_user_data  = sk->sk_user_data;
-    sk->sk_data_ready  = ___sk_data_ready;
+    sk->sk_data_ready  = hammer_sk_data_ready;
     sk->sk_user_data   = c;
 
     write_unlock_bh(&sk->sk_callback_lock);
-};
+}
 
 void unregister_callbacks(struct connection *c) {
     struct sock *sk = c->socket->sk;
@@ -189,13 +262,17 @@ static struct connection * connect_to(char *host) {
     struct connection *c = kmalloc(sizeof(*c), GFP_KERNEL);
     if (!c)
         goto bad;
-    c->socket = NULL;
-    c->output_len = 0;
-    c->output = NULL;
-    snprintf(c->procfs_name,128,"c_%s_%p",host,c);
 
-    c->procfs_entry = procify(c->procfs_name,(void *) c, tail, hammer);
-    if (!c->procfs_entry)
+    memset(c,0,sizeof(*c));
+    snprintf(c->proc[PROC_DATA].name,sizeof(c->proc[PROC_DATA].name),"c_%s_%p",host,c);
+    snprintf(c->proc[PROC_STAT].name,sizeof(c->proc[PROC_STAT].name),"s_%s_%p",host,c);
+    
+    c->proc[PROC_DATA].entry = procify(c->proc[PROC_DATA].name,(void *) c, tail, hammer);
+    if (!c->proc[PROC_DATA].entry)
+        goto bad;
+
+    c->proc[PROC_STAT].entry = procify(c->proc[PROC_STAT].name,(void *) c, stats, NULL);
+    if (!c->proc[PROC_STAT].entry)
         goto bad;
 
     if ((rc = sock_create(AF_INET,SOCK_STREAM,IPPROTO_TCP,&c->socket)) < 0)
@@ -228,12 +305,18 @@ bad:
         if (c->socket)
             sock_release(c->socket);
 
-        if (c->procfs_entry)
-            remove_proc_entry(c->procfs_name, root);
+        cleanup_procfs_entries(c);
         kfree(c);
     }
     D("error creating socket for %s rc: %d",host,rc);
     return NULL;
+}
+
+static void cleanup_procfs_entries(struct connection *c) {
+    int i;
+    for (i = 0; i < sizeof(c->proc)/sizeof(c->proc[0]); i++)
+        if (c->proc[i].entry)
+            remove_proc_entry(c->proc[i].name,root);
 }
 
 static void disconnect(struct connection *c) {
@@ -268,7 +351,9 @@ struct proc_dir_entry *procify(char *name, void *data,
 }
 
 int init_module() {
+    char *http_status_line = "HTTP/1.1 000";
     spin_lock_init(&giant);
+    memcpy(HTTP.u8,http_status_line,sizeof(HTTP.u8));
 
     root = proc_mkdir(MODULE_NAME, NULL);
     if (root == NULL) 
@@ -291,8 +376,8 @@ void cleanup_module() {
         disconnect(c);
         if (c->output)
             kfree(c->output);
-        if (c->procfs_entry)
-            remove_proc_entry(c->procfs_name, root);
+
+        cleanup_procfs_entries(c);
         kfree(c);
     }
 

@@ -24,17 +24,23 @@ for connecting, sending and receiving tcp socket data.
   only unloading the module
 
 * concept
-  * there are no threads
+  + there are no threads
     we just get the sk_buffs from the tcp stack in interrupt context.
 
-  * no multiplexing
+  + no multiplexing
     the kernel tcp stack mutiplexes for us, in the codepath driver->ip->tcp->sk_data_ready
 
-  * there is no sleeping, if memory allocation fails we just skip this frame.
+  + there is no sleeping, if memory allocation fails we just skip this frame.
 
-  * everything stays in kernel address space, only the last N bytes are coppied
+  + everything stays in kernel address space, only the last N bytes are coppied
     on /proc/hammer/c_* read request
 
+* /proc/hammer/s_*
+   each connection is counting number of HTTP response status codes
+   so cat /proc/hammer/s_127.0.0.1\:9200_ffff8801* will give
+   [status code] : [number of packets containing HTTP/1.1 {status code}] for example:
+
+   200 : 25342
 
 * license
    free for all
