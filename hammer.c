@@ -153,6 +153,7 @@ static int hammer_tcp_data_recv(read_descriptor_t *desc, struct sk_buff *skb,uns
     if (c->output) {
         skb_copy_bits(skb, offset,(c->output + c->output_len),len);
         c->output_len += len;
+        c->procfs_entry->size = c->output_len;
     }
     return len;
 }
@@ -188,9 +189,15 @@ static struct connection * connect_to(char *host) {
     struct connection *c = kmalloc(sizeof(*c), GFP_KERNEL);
     if (!c)
         goto bad;
-
+    c->socket = NULL;
     c->output_len = 0;
     c->output = NULL;
+    snprintf(c->procfs_name,128,"c_%s_%p",host,c);
+
+    c->procfs_entry = procify(c->procfs_name,(void *) c, tail, hammer);
+    if (!c->procfs_entry)
+        goto bad;
+
     if ((rc = sock_create(AF_INET,SOCK_STREAM,IPPROTO_TCP,&c->socket)) < 0)
         goto bad;
 
@@ -207,8 +214,6 @@ static struct connection * connect_to(char *host) {
     spin_lock(&giant);
 
     list_add(&c->list,&connections);
-    snprintf(c->procfs_name,128,"c_%s_%p",host,c);
-    c->procfs_entry = procify(c->procfs_name,(void *) c, tail, hammer);
 
     spin_unlock(&giant);
 
@@ -221,6 +226,9 @@ bad:
     if (c) {
         if (c->socket)
             sock_release(c->socket);
+
+        if (c->procfs_entry)
+            remove_proc_entry(c->procfs_name, root);
         kfree(c);
     }
     D("error creating socket for %s rc: %d",host,rc);
