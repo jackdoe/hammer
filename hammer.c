@@ -243,10 +243,10 @@ static void disconnect(struct connection *c) {
     c->state = DISCONNECTED;
     unregister_callbacks(c);
    
-#ifndef kernel_sock_shutdown
-    c->socket->ops->shutdown(c->socket, 2);
+#ifdef kernel_sock_shutdown
+    kernel_sock_shutdown(c->socket, SHUT_RDWR);
 #else
-    kernel_sock_shutdown(c->socket,2);
+    c->socket->ops->shutdown(c->socket, SHUT_RDWR);
 #endif
 }
 
