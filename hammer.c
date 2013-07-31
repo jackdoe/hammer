@@ -4,7 +4,6 @@
 #include <net/sock.h>
 #include <net/tcp.h>
 #include <linux/proc_fs.h>
-#include <asm/types.h>
 MODULE_LICENSE("free-for-all");
 #define MODULE_NAME  "hammer"
 #define CONTROL_NAME "__control"
@@ -44,18 +43,18 @@ struct connection {
 // http://www.w3.org/Protocols/rfc2616/rfc2616-sec6.html#sec6
 union http_status_line {
     struct u64_u32 {
-        u64 http_dash_one_dot_one;
+        unsigned long long http_dash_one_dot_one;
         union {
             u32 space_digit_digit_digit;
             struct structed {
-                u8 space;
-                u8 digit_0;
-                u8 digit_1;
-                u8 digit_2;
+                unsigned char space;
+                unsigned char digit_0;
+                unsigned char digit_1;
+                unsigned char digit_2;
             }  __attribute__((packed)) structed;
         } u32;
     } __attribute__((packed)) u64_u32;
-    u8 u8[12];
+    unsigned char u8[12];
 };
 
 static union http_status_line HTTP;
@@ -75,6 +74,7 @@ static int control_write(struct file *file, const char *buffer, unsigned long co
 static int tail(char *buffer, char **buffer_location, off_t offset, int count, int *eof, void *data);
 static int stats(char *buffer, char **buffer_location, off_t offset, int count, int *eof, void *data);
 static int hammer(struct file *file, const char *buffer, unsigned long count, void *data);
+inline static unsigned short three_digits_to_u16(char *digits);
 
 // POC: just show the last 'count' bytes from the buffer
 static int tail(char *buffer, char **buffer_location, off_t offset, int count, int *eof, void *data) {
@@ -195,24 +195,20 @@ static void hammer_sk_data_ready (struct sock *sk, int bytes) {
     (*ready)(sk,bytes);
 }
 
-void collect_http_stats(struct connection *c, size_t len) {
+static void collect_http_stats(struct connection *c, size_t len) {
     union http_status_line *status = (union http_status_line *) (c->output + c->output_len - len);
-    char s_code[4];
-    unsigned short code = 0;
-    
     if (len < sizeof(HTTP) ||
         status->u64_u32.http_dash_one_dot_one != HTTP.u64_u32.http_dash_one_dot_one)
             return;
 
-    // just look for HTTP/1.1[whatever_one_byte][byte][byte][byte]
-    s_code[0] = status->u64_u32.u32.structed.digit_0;
-    s_code[1] = status->u64_u32.u32.structed.digit_1;
-    s_code[2] = status->u64_u32.u32.structed.digit_2;
-    s_code[3] = '\0';
-    
-    kstrtou16(s_code,10,&code);
-    c->stats.http_code[code]++;
+    c->stats.http_code[three_digits_to_u16(&status->u64_u32.u32.structed.digit_0)]++;
     D("found http packet with code: %d",code);
+}
+
+inline static unsigned short three_digits_to_u16(char *digits) {
+    #define digit_or_zero(d) (((d) >= '0' && (d) <= '9') ? (d) : 0)
+    return (unsigned short ) (100 * (digit_or_zero(digits[0]) - '0')) + (10 * ( digit_or_zero(digits[1]) - '0')) + (digit_or_zero(digits[2]) - '0');
+    #undef digit_or_zero
 }
 
 static int hammer_tcp_data_recv(read_descriptor_t *desc, struct sk_buff *skb,unsigned int offset, size_t len) {
