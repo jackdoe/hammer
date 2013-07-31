@@ -18,6 +18,9 @@ MODULE_LICENSE("free-for-all");
 #define DISCONNECTED            2
 #define PROC_DATA 0
 #define PROC_STAT 1
+#ifndef SHUT_RDWR
+  #define SHUT_RDWR 2
+#endif
 static struct proc_dir_entry *root;
 static struct proc_dir_entry *control;
 static spinlock_t giant;
@@ -35,7 +38,7 @@ struct connection {
     char   *output;
     ssize_t output_len;
     struct stats {
-        unsigned long long http_code[65535 + 1];
+        unsigned long long http_code[600];
     } stats;
 };
 
@@ -197,11 +200,13 @@ static void hammer_sk_data_ready (struct sock *sk, int bytes) {
 
 static void collect_http_stats(struct connection *c, size_t len) {
     union http_status_line *status = (union http_status_line *) (c->output + c->output_len - len);
+    unsigned short code;
     if (len < sizeof(HTTP) ||
         status->u64_u32.http_dash_one_dot_one != HTTP.u64_u32.http_dash_one_dot_one)
             return;
 
-    c->stats.http_code[three_digits_to_u16(&status->u64_u32.u32.structed.digit_0)]++;
+    code = three_digits_to_u16(&status->u64_u32.u32.structed.digit_0);
+    c->stats.http_code[code > 599 ? 0 : code]++;
     D("found http packet with code: %d",code);
 }
 
@@ -321,7 +326,7 @@ static void disconnect(struct connection *c) {
 
     c->state = DISCONNECTED;
     unregister_callbacks(c);
-   
+  
 #ifdef kernel_sock_shutdown
     kernel_sock_shutdown(c->socket, SHUT_RDWR);
 #else
