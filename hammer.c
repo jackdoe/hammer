@@ -9,10 +9,16 @@ MODULE_LICENSE("free-for-all");
 #define CONTROL_NAME "__control"
 
 // #define DEBUG
+// #define HAMMER_OVERWRITE
+
 #ifdef DEBUG
   #define D(fmt,arg...) printk(fmt " [%s():%s:%d]\n",##arg,__func__,__FILE__,__LINE__)
 #else
   #define D(fmt,arg...)
+#endif
+
+#ifndef MIN
+  #define MIN(a,b) ((a) > (b) ? (b) : (a))
 #endif
 #define CONNECTED               1
 #define DISCONNECTED            2
@@ -35,7 +41,11 @@ struct connection {
         char   name[128];
         struct proc_dir_entry *entry;
     } proc[2];
-    char   *output;
+#ifdef HAMMER_OVERWRITE
+    char output[10240];
+#else
+    char *output;
+#endif
     ssize_t output_len;
     struct stats {
         unsigned long long http_code[600];
@@ -137,7 +147,7 @@ static int hammer(struct file *file, const char *buffer, unsigned long count, vo
     msg.msg_iovlen = 1;
     msg.msg_control = NULL;
     msg.msg_controllen = 0;
-    msg.msg_flags = 0;
+    msg.msg_flags = MSG_DONTWAIT;
 
     return sock_sendmsg(c->socket, &msg, count);
 }
@@ -198,8 +208,8 @@ static void hammer_sk_data_ready (struct sock *sk, int bytes) {
     (*ready)(sk,bytes);
 }
 
-static void collect_http_stats(struct connection *c, size_t len) {
-    union http_status_line *status = (union http_status_line *) (c->output + c->output_len - len);
+static void collect_http_stats(struct connection *c, char *buf, size_t len) {
+    union http_status_line *status = (union http_status_line *) (buf);
     unsigned short code;
     if (len < sizeof(HTTP) ||
         status->u64_u32.http_dash_one_dot_one != HTTP.u64_u32.http_dash_one_dot_one)
@@ -218,17 +228,25 @@ inline static unsigned short three_digits_to_u16(char *digits) {
 
 static int hammer_tcp_data_recv(read_descriptor_t *desc, struct sk_buff *skb,unsigned int offset, size_t len) {
     struct connection *c = (struct connection *) desc->arg.data;
-
+#ifdef HAMMER_OVERWRITE
+    size_t to_copy = MIN(len,sizeof(c->output));
+#endif
     if (len == 0)
         return 0;
 
-    c->output = krealloc(c->output,c->output_len + len,GFP_ATOMIC);
+#ifdef HAMMER_OVERWRITE
+    skb_copy_bits(skb, offset, c->output,to_copy);
+    collect_http_stats(c, c->output, to_copy);
+    c->output_len = to_copy;
+#else
+    c->output = krealloc(c->output, c->output_len + len, GFP_ATOMIC);
     if (c->output) {
-        skb_copy_bits(skb, offset,(c->output + c->output_len),len);
+        skb_copy_bits(skb, offset, (c->output + c->output_len), len);
+        collect_http_stats(c, (c->output + c->output_len), len);
         c->output_len += len;
-        c->proc[PROC_DATA].entry->size = c->output_len;
-        collect_http_stats(c,len);
     }
+#endif
+    c->proc[PROC_DATA].entry->size += len;
     return len;
 }
 
@@ -261,10 +279,17 @@ static struct connection * connect_to(char *host) {
     struct sockaddr_in si;
     int rc = 0;
     struct connection *c = kmalloc(sizeof(*c), GFP_KERNEL);
+
     if (!c)
         goto bad;
 
     memset(c,0,sizeof(*c));
+    memset(&si, 0, sizeof(si));
+
+    si.sin_family = AF_INET;
+    if (inet_addr(host,&si.sin_addr.s_addr,&si.sin_port) < 0)
+        goto bad;
+
     snprintf(c->proc[PROC_DATA].name,sizeof(c->proc[PROC_DATA].name),"c_%s_%p",host,c);
     snprintf(c->proc[PROC_STAT].name,sizeof(c->proc[PROC_STAT].name),"s_%s_%p",host,c);
     
@@ -278,14 +303,10 @@ static struct connection * connect_to(char *host) {
 
     if ((rc = sock_create(AF_INET,SOCK_STREAM,IPPROTO_TCP,&c->socket)) < 0)
         goto bad;
+
 #ifdef SK_CAN_REUSE
     c->socket->sk->sk_reuse = SK_CAN_REUSE;
 #endif
-    memset(&si, 0, sizeof(si));
-    si.sin_family = AF_INET;
-
-    if (inet_addr(host,&si.sin_addr.s_addr,&si.sin_port) < 0)
-        goto bad;
     
     if ((rc = kernel_connect(c->socket, (struct sockaddr *)&si, sizeof(si),0)) < 0)
         goto bad;
@@ -375,9 +396,10 @@ void cleanup_module() {
         c = list_entry(pos, struct connection, list);
         list_del(&c->list);
         disconnect(c);
+#ifndef HAMMER_OVERWRITE
         if (c->output)
             kfree(c->output);
-
+#endif
         cleanup_procfs_entries(c);
         kfree(c);
     }

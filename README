@@ -11,6 +11,11 @@ for connecting, sending and receiving tcp socket data.
 * connecting to something
     $ echo "bzbzb" | nc -l 12345 # start netcat listener on port 12345
     $ sudo echo "127.0.0.1:12345" > /proc/hammer/__control
+
+    you can also specify specify small comments like 
+    $ echo "127.0.0.1:12345@some_identifier" > /proc/hammer/__control
+    and it will appear in the file
+
     $ sudo cat /proc/hammer/c_127.0.0.1:12345* 
     # you will see 'bzbzb'
     $ sudo echo "42" > /proc/hammer/c_127.0.0.1:12345*
@@ -21,14 +26,18 @@ for connecting, sending and receiving tcp socket data.
     so it looks like: /proc/hammer/c_127.0.0.1:12345_ffff880003d2a700
 
 * aa... everything stays in memory. there is no mechanism for flushing anything,
-  only unloading the module
+  only unloading the module. You can define HAMMER_OVERWRITE in hammer.c
+  and this will not allocate anything, it will just overwrite 10k buffer in the
+  connection structure (that is if you do not care for the whole connection, but
+  you only want some stats, like http status codes)
 
 * concept
   + there are no threads
     we just get the sk_buffs from the tcp stack in interrupt context.
 
   + no multiplexing
-    the kernel tcp stack mutiplexes for us, in the codepath driver->ip->tcp->sk_data_ready
+    the kernel tcp stack mutiplexes for us, in the codepath 
+    driver->ip->tcp->sk_data_ready
 
   + there is no sleeping, if memory allocation fails we just skip this frame.
 
