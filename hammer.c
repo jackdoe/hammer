@@ -56,7 +56,7 @@ struct connection {
 // http://www.w3.org/Protocols/rfc2616/rfc2616-sec6.html#sec6
 union http_status_line {
     struct u64_u32 {
-        unsigned long long http_dash_one_dot_one;
+        unsigned long long http_slash_one_dot_one;
         union {
             u32 space_digit_digit_digit;
             struct structed {
@@ -212,7 +212,7 @@ static void collect_http_stats(struct connection *c, char *buf, size_t len) {
     union http_status_line *status = (union http_status_line *) (buf);
     unsigned short code;
     if (len < sizeof(HTTP) ||
-        status->u64_u32.http_dash_one_dot_one != HTTP.u64_u32.http_dash_one_dot_one)
+        status->u64_u32.http_slash_one_dot_one != HTTP.u64_u32.http_slash_one_dot_one)
             return;
 
     code = three_digits_to_u16(&status->u64_u32.u32.structed.digit_0);
